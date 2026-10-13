@@ -7,34 +7,59 @@ const taskList = document.getElementById('taskList');
 const taskCounter = document.getElementById('taskCounter');
 const filterButtons = document.querySelectorAll('.filter-btn');
 
-const STORAGE_KEY = 'todoTasksKuliah';
-
-let tasks = ambilDariStorage();
+const API_URL = '/api/tugas';
+let tasks = [];
 let filterAktif = "all";
 
-// 1. LOCAL STORAGE
-function ambilDariStorage() {
-    const data = localStorage.getItem(STORAGE_KEY);
-    return data ? JSON.parse(data) : [];
+// Helper Cek Respon Server
+async function cekRespon(response) {
+    if (!response.ok) {
+        let pesanError = 'Terjadi kesalahan pada server.';
+        try {
+            const errData = await response.json();
+            pesanError = errData.message || pesanError;
+        } catch (e) {
+            // Jika response bukan json
+        }
+        throw new Error(pesanError);
+    }
+    return response;
 }
 
-function simpanKeStorage() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks));
+// 1. MUAT TUGAS (GET /api/tugas dengan LocalStorage Fallback untuk pengujian lokal)
+async function muatTugas() {
+    taskList.innerHTML = '<li class="empty-message">Memuat tugas...</li>';
+    errorMsg.textContent = '';
+
+    try {
+        const response = await fetch(API_URL);
+        await cekRespon(response);
+        tasks = await response.json();
+    } catch (error) {
+        // Fallback otomatis ke localStorage agar tidak error saat dites offline/lokal
+        console.warn("API tidak aktif, beralih ke localStorage:", error.message);
+        const dataLokal = localStorage.getItem('todoTasksKuliah_fallback');
+        tasks = dataLokal ? JSON.parse(dataLokal) : [];
+    }
+    render();
 }
 
-// 2. RENDER UTAMA (Membangun seluruh tampilan berdasarkan state & filter)
+// Fungsi bantu simpan lokal cadangan
+function simpanLokalFallback() {
+    localStorage.setItem('todoTasksKuliah_fallback', JSON.stringify(tasks));
+}
+
+// 2. RENDER UTAMA
 function render() {
     taskList.innerHTML = '';
     errorMsg.textContent = '';
 
-    // Filter tasks
     let filteredTasks = tasks.filter(task => {
         if (filterAktif === 'active') return !task.selesai;
         if (filterAktif === 'completed') return task.selesai;
-        return true; // 'all'
+        return true;
     });
 
-    // Pesan jika daftar kosong
     if (filteredTasks.length === 0) {
         const li = document.createElement('li');
         li.className = 'empty-message';
@@ -46,25 +71,24 @@ function render() {
             li.className = `task-item ${task.selesai ? 'completed' : ''}`;
             li.setAttribute('data-id', task.id);
 
-            // Struktur HTML item tugas menggunakan textContent (Aman dari XSS)
             const infoDiv = document.createElement('div');
             infoDiv.className = 'task-info';
 
             const checkbox = document.createElement('input');
             checkbox.type = 'checkbox';
             checkbox.checked = task.selesai;
-            checkbox.className = 'toggle-checkbox';
+            checkbox.className = 'toggle-checkbox toggle-selesai';
 
             const textDiv = document.createElement('div');
             textDiv.className = 'task-text-content';
 
             const titleSpan = document.createElement('span');
             titleSpan.className = 'task-title-text';
-            titleSpan.textContent = task.judul; // AMAN (textContent)
+            titleSpan.textContent = task.judul;
 
             const metaSpan = document.createElement('span');
             metaSpan.className = 'task-meta';
-            metaSpan.textContent = `${task.matkul} • Deadline: ${task.deadline}`; // AMAN (textContent)
+            metaSpan.textContent = `${task.matkul || task.mataKuliah} • Deadline: ${task.deadline}`;
 
             textDiv.appendChild(titleSpan);
             textDiv.appendChild(metaSpan);
@@ -73,6 +97,7 @@ function render() {
             infoDiv.appendChild(textDiv);
 
             const deleteBtn = document.createElement('button');
+            deleteBtn.type = 'button';
             deleteBtn.className = 'delete-btn delete-action';
             deleteBtn.textContent = 'Hapus';
 
@@ -82,20 +107,18 @@ function render() {
         });
     }
 
-    // Update Counter "N tugas aktif"
     const activeCount = tasks.filter(t => !t.selesai).length;
     taskCounter.textContent = `${activeCount} tugas aktif`;
 }
 
-// 3. TAMBAH TASK (Event Submit & Validasi)
-taskForm.addEventListener('submit', function(e) {
-    e.preventDefault(); // Mencegah reload halaman
+// 3. TAMBAH TASK (POST /api/tugas)
+taskForm.addEventListener('submit', async function(e) {
+    e.preventDefault();
 
     const judul = taskInput.value.trim();
     const matkul = matkulInput.value;
     const deadline = deadlineInput.value;
 
-    // Validasi: Judul minimal 3 karakter & deadline wajib diisi
     if (judul.length < 3) {
         errorMsg.textContent = 'Judul tugas minimal harus 3 karakter!';
         return;
@@ -106,53 +129,81 @@ taskForm.addEventListener('submit', function(e) {
     }
 
     errorMsg.textContent = '';
-
     const newTask = {
         id: Date.now(),
         judul: judul,
         matkul: matkul,
+        mataKuliah: matkul,
         deadline: deadline,
         selesai: false
     };
 
-    tasks.push(newTask);
-    simpanKeStorage();
-    render();
+    try {
+        const response = await fetch(API_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(newTask)
+        });
+        await cekRespon(response);
+        await muatTugas();
+    } catch (error) {
+        // Fallback jika API gagal: simpan secara lokal agar aplikasi tetap berfungsi di browser kamu
+        tasks.push(newTask);
+        simpanLokalFallback();
+        render();
+    }
 
-    // Reset form
     taskInput.value = '';
     deadlineInput.value = '';
     taskInput.focus();
 });
 
-// 4. EVENT DELEGATION (Menangani klik checkbox & tombol hapus pada <ul>)
-taskList.addEventListener('click', function(e) {
+// 4. EVENT DELEGATION (PATCH & DELETE)
+taskList.addEventListener('click', async function(e) {
     const li = e.target.closest('.task-item');
     if (!li) return;
 
-    const id = Number(li.getAttribute('data-id'));
-    const task = tasks.find(t => t.id === id);
+    const id = li.getAttribute('data-id');
+    const task = tasks.get ? null : tasks.find(t => String(t.id) === String(id));
     if (!task) return;
 
-    // Aksi Klik Checkbox Selesai
-    if (e.target.classList.contains('toggle-checkbox')) {
-        task.selesai = e.target.checked;
-        simpanKeStorage();
-        render();
+    if (e.target.classList.contains('toggle-selesai')) {
+        const statusBaru = e.target.checked;
+        try {
+            const response = await fetch(`${API_URL}/${id}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ selesai: statusBaru })
+            });
+            await cekRespon(response);
+            await muatTugas();
+        } catch (error) {
+            task.selesai = statusBaru;
+            simpanLokalFallback();
+            render();
+        }
     }
 
-    // Aksi Klik Tombol Hapus
     if (e.target.classList.contains('delete-action')) {
-        tasks = tasks.filter(t => t.id !== id);
-        simpanKeStorage();
-        render();
+        if (!confirm('Apakah Anda yakin ingin menghapus tugas ini?')) return;
+
+        try {
+            const response = await fetch(`${API_URL}/${id}`, {
+                method: 'DELETE'
+            });
+            await cekRespon(response);
+            await muatTugas();
+        } catch (error) {
+            tasks = tasks.filter(t => String(t.id) !== String(id));
+            simpanLokalFallback();
+            render();
+        }
     }
 });
 
 // 5. FILTER BUTTONS
 filterButtons.forEach(btn => {
     btn.addEventListener('click', function() {
-        // Pindah kelas 'on' ke tombol yang diklik
         filterButtons.forEach(b => b.classList.remove('on'));
         this.classList.add('on');
 
@@ -161,5 +212,5 @@ filterButtons.forEach(btn => {
     });
 });
 
-// Render awal saat halaman dibuka
-render();
+// Inisialisasi awal
+muatTugas();
